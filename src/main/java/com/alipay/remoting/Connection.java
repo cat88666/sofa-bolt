@@ -351,8 +351,8 @@ public class Connection {
      *
      * @param poolKey connection pool key
      */
-    public void removePoolKey(String poolKey) {
-        poolKeys.remove(poolKey);
+    public boolean removePoolKey(String poolKey) {
+        return poolKeys.remove(poolKey);
     }
 
     /**
@@ -410,8 +410,8 @@ public class Connection {
      *
      * @param key attribute key
      */
-    public void removeAttribute(String key) {
-        attributes.remove(key);
+    public Object removeAttribute(String key) {
+        return attributes.remove(key);
     }
 
     /**
