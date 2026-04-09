@@ -27,35 +27,7 @@ import com.alipay.remoting.exception.RemotingException;
 import com.alipay.remoting.rpc.RpcClient;
 import com.alipay.remoting.rpc.RpcResponseFuture;
 
-/**
- * @author jiachun.fjc
- */
 public class BenchmarkClient {
-
-    /**
-     * body=4096, CODEC_FLUSH_CONSOLIDATION=turnOff
-     * Request count: 10240000, time: 347 second, qps: 29510
-     *
-     * body=4096, CODEC_FLUSH_CONSOLIDATION=turnOn
-     * Request count: 10240000, time: 311 second, qps: 32926
-     *
-     * -------------------------------------------------------
-     *
-     * body=1024, CODEC_FLUSH_CONSOLIDATION=turnOff
-     * Request count: 10240000, time: 206 second, qps: 49708
-     *
-     * body=1024, CODEC_FLUSH_CONSOLIDATION=turnOn
-     * Request count: 10240000, time: 148 second, qps: 69189
-     *
-     * -------------------------------------------------------
-     *
-     * body=128, CODEC_FLUSH_CONSOLIDATION=turnOff
-     * Request count: 10240000, time: 148 second, qps: 69189
-     *
-     * body=128, CODEC_FLUSH_CONSOLIDATION=turnOn
-     * Request count: 10240000, time: 69 second, qps: 148405
-     *
-     */
 
     private static final byte[] BYTES = new byte[128];
 
@@ -63,89 +35,83 @@ public class BenchmarkClient {
         ThreadLocalRandom.current().nextBytes(BYTES);
     }
 
-    public static void main(String[] args) throws RemotingException, InterruptedException {
+    public static void main(String[] args) throws InterruptedException {
+        // 设置 Netty 高低水位线，防止在高并发压力下发送缓冲区溢出导致 OOM 或死锁
         System.setProperty("bolt.netty.buffer.high.watermark", String.valueOf(64 * 1024 * 1024));
         System.setProperty("bolt.netty.buffer.low.watermark", String.valueOf(32 * 1024 * 1024));
+
         RpcClient rpcClient = new RpcClient();
+        // 开启 Netty Flush 整合优化：合并小的写操作以减少系统调用，显著提升高吞吐量场景下的性能
         rpcClient.option(BoltClientOption.NETTY_FLUSH_CONSOLIDATION, true);
         rpcClient.startup();
-
-        int processors = Runtime.getRuntime().availableProcessors();
-        callWithFuture(rpcClient, "127.0.0.1:18090", processors << 4);
+        runBenchmark(rpcClient, "127.0.0.1:18090");
     }
 
-    @SuppressWarnings("SameParameterValue")
-    private static void callWithFuture(final RpcClient rpcClient, final String address, int threads) {
-        // warmup
-        for (int i = 0; i < 10000; i++) {
-            try {
-                RpcResponseFuture f = rpcClient.invokeWithFuture(address,
-                    new Request<byte[]>(BYTES), 5000);
-                f.get();
-            } catch (Throwable e) {
-                e.printStackTrace();
-            }
-        }
+    /**
+     * 执行压力测试
+     */
+    private static void runBenchmark(final RpcClient rpcClient, final String address) throws InterruptedException {
+        final int requestsPerThread = 80; // 每个线程计划发送的请求总数
+        final int pipelineBatchSize = 80;    // 流水线深度：一次性发出 80 个异步请求后再统一等待结果，能极大提升吞吐量
+        int threadCount = Runtime.getRuntime().availableProcessors() * 16; // 并发线程数设为 CPU 核心数的 16 倍
+        final CountDownLatch completionLatch = new CountDownLatch(threadCount);
+        final AtomicLong totalRequestCount = new AtomicLong();
+        long startTime = System.currentTimeMillis();
 
-        final int t = 80000;
-        long start = System.currentTimeMillis();
-        final CountDownLatch latch = new CountDownLatch(threads);
-        final AtomicLong count = new AtomicLong();
-        final int futureSize = 80;
-        for (int i = 0; i < threads; i++) {
+        for (int i = 0; i < threadCount; i++) {
             new Thread(new Runnable() {
-
-                List<RpcResponseFuture> futures = new ArrayList<RpcResponseFuture>(futureSize);
+                final List<RpcResponseFuture> pendingFutures = new ArrayList<>(pipelineBatchSize);
 
                 @Override
                 public void run() {
-                    for (int i = 0; i < t; i++) {
+                    for (int j = 0; j < requestsPerThread; j++) {
                         try {
-                            RpcResponseFuture f = rpcClient.invokeWithFuture(address,
-                                new Request<byte[]>(BYTES), 5000);
-                            futures.add(f);
-                            if (futures.size() == futureSize) {
-                                int fSize = futures.size();
-                                for (int j = 0; j < fSize; j++) {
-                                    try {
-                                        futures.get(j).get();
-                                    } catch (Throwable t) {
-                                        t.printStackTrace();
-                                    }
-                                }
-                                futures.clear();
+                            // 异步调用：只管发出请求，不立即阻塞等待结果
+                            pendingFutures.add(rpcClient.invokeWithFuture(address, new Request<>(BYTES), 5000));
+
+                            // 当流水线中的请求达到设定的阈值时，开始批量获取结果 (Pipelining 核心逻辑)
+                            if (pendingFutures.size() == pipelineBatchSize) {
+                                waitAndClearFutures(pendingFutures);
                             }
-                            if (count.getAndIncrement() % 10000 == 0) {
-                                System.out.println("count=" + count.get());
+
+                            // 每隔 10000 个请求打印一次全局进度
+                            if (totalRequestCount.getAndIncrement() % 10000 == 0) {
+                                System.out.println("Current processed count = " + totalRequestCount.get());
                             }
                         } catch (Exception e) {
                             e.printStackTrace();
                         }
                     }
-                    if (!futures.isEmpty()) {
-                        int fSize = futures.size();
-                        for (int j = 0; j < fSize; j++) {
-                            try {
-                                futures.get(j).get();
-                            } catch (Throwable t) {
-                                t.printStackTrace();
-                            }
-                        }
-                        futures.clear();
+                    // 处理线程收尾阶段：确保最后一批不满 pipelineBatchSize 的请求也被正确等待
+                    if (!pendingFutures.isEmpty()) {
+                        waitAndClearFutures(pendingFutures);
                     }
-                    latch.countDown();
+                    completionLatch.countDown();
                 }
-            }, "benchmark_" + i).start();
+
+                // 批量等待 Future 结果并清空列表
+                private void waitAndClearFutures(List<RpcResponseFuture> futures) {
+                    for (RpcResponseFuture f : futures) {
+                        try {
+                            f.get();
+                        } catch (Throwable t) {
+                            t.printStackTrace();
+                        }
+                    }
+                    futures.clear();
+                }
+            }, "benchmark_thread_" + i).start();
         }
 
-        try {
-            latch.await();
-            System.out.println("count=" + count.get());
-        } catch (InterruptedException e) {
-            e.printStackTrace();
+        completionLatch.await();
+        System.out.println("Final total count = " + totalRequestCount.get());
+
+
+        // 3. 计算压测结果 (QPS)
+        long durationInSeconds = (System.currentTimeMillis() - startTime) / 1000;
+        if (durationInSeconds > 0) {
+            long qps = totalRequestCount.get() / durationInSeconds;
+            System.out.println("压测结果,总请求：" + totalRequestCount.get() + ", Time cost: " + durationInSeconds + "s, QPS: " + qps);
         }
-        long second = (System.currentTimeMillis() - start) / 1000;
-        System.out.println("Request count: " + count.get() + ", time: " + second + " second, qps: "
-                           + count.get() / second);
     }
 }

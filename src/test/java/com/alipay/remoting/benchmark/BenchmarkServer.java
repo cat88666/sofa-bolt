@@ -19,9 +19,7 @@ package com.alipay.remoting.benchmark;
 import com.alipay.remoting.config.BoltServerOption;
 import com.alipay.remoting.rpc.RpcServer;
 
-/**
- * @author jiachun.fjc
- */
+
 public class BenchmarkServer {
 
     public static void main(String[] args) {

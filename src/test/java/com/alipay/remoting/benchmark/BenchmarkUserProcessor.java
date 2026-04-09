@@ -20,10 +20,6 @@ import com.alipay.remoting.AsyncContext;
 import com.alipay.remoting.BizContext;
 import com.alipay.remoting.rpc.protocol.AsyncUserProcessor;
 
-/**
- *
- * @author jiachun.fjc
- */
 public class BenchmarkUserProcessor extends AsyncUserProcessor<Request> {
 
     @Override

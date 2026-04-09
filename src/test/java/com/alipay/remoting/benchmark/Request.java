@@ -18,10 +18,6 @@ package com.alipay.remoting.benchmark;
 
 import java.io.Serializable;
 
-/**
- *
- * @author jiachun.fjc
- */
 public class Request<T> implements Serializable {
 
     private static final long serialVersionUID = -1L;
@@ -31,6 +27,8 @@ public class Request<T> implements Serializable {
     }
 
     private T data;
+
+
 
     public T getData() {
         return data;
